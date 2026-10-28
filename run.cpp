@@ -14,7 +14,13 @@
 #include <cmath>
 #include <algorithm>
 #include <cctype>
+#include <array>
+#include <cstdio>
+#include <cstdint>
 
+#ifndef UNROLL
+#define UNROLL 8
+#endif
 // ----------------------------------------------------------------------------
 // utilities: time
 double g_matmul_ms = 0.0;
@@ -272,16 +278,21 @@ void softmax(std::span<float> x, int size){
 }
 
 void matmul(std::span<float> out, std::span<const float> x, std::span<const float> weight, int n, int d){
-    // W(d, n) @ x(n, ) -> xout(d, )
     double t0 = time_in_ms();
     int i;
     #pragma omp parallel for private(i)
     for (i = 0; i < d; i++){
-        float val = 0.0f;
-        #pragma omp simd reduction(+:val)
-        for (int j = 0; j < n; j++){
-            val += weight[i * n + j] * x[j];
+        constexpr int U = UNROLL;
+        float s[U] = {};                       // U 条独立累加链
+        int j = 0;
+        for (; j + U - 1 < n; j += U){
+            for (int u = 0; u < U; u++){       // U 是编译期常量，这层会被完全展开
+                s[u] += weight[i * n + j + u] * x[j + u];
+            }
         }
+        float val = 0.f;
+        for (int u = 0; u < U; u++){ val += s[u]; }
+        for (; j < n; j++){ val += weight[i * n + j] * x[j]; }
         out[i] = val;
     }
     g_matmul_ms += time_in_ms() - t0;
@@ -310,7 +321,7 @@ std::vector<float>& Transformer::forward(int token, int pos){
 
 
         // key and value point to the kv cache
-        int loff = l * config.seq_max * kv_dim;
+        size_t loff = l * config.seq_max * kv_dim;
         state.k = std::span<float>(state.key_cache).subspan(loff + pos * kv_dim, kv_dim);
         state.v = std::span<float>(state.value_cache).subspan(loff + pos * kv_dim, kv_dim);
 
@@ -486,8 +497,6 @@ public:
         std::sort(sorted_vocab_.begin(), sorted_vocab_.end());
     }
 
-    ~Tokenizer() = default;
-
     std::string decode(int prev_token, int token){
         std::string piece = vocab_[token];
 
@@ -595,8 +604,6 @@ public:
         rng_state_(rng_seed) {
             probindex_.resize(vocab_size_);
         }
-
-    ~Sampler() = default;
 
     int sample_mult(std::span<const float> prob, int n, float coin){
         float cdf = 0.0f;
@@ -724,10 +731,10 @@ void chat(Transformer& transformer, Tokenizer& tokenizer, Sampler& sampler,
             std::string& cli_user_prompt, std::string& cli_system_prompt, int steps){
     std::string system_prompt;
     std::string user_prompt;
-    char rendered_prompt[1152];
+    std::string rendered_prompt;
     int num_prompt_tokens = 0;
     std::vector<int> prompt_tokens;
-    int user_idx;
+    int user_idx = 0;
 
     int8_t user_turn = 1;
     int next = 0;
@@ -748,12 +755,11 @@ void chat(Transformer& transformer, Tokenizer& tokenizer, Sampler& sampler,
             } else {
                 user_prompt = read_stdin("User: ");
             }
-            if (pos == 0 && system_prompt[0] != '\0') {
-                char system_template[] = "[INST] <<SYS>>\n%s\n<</SYS>>\n\n%s [/INST]";
-                sprintf(rendered_prompt, system_template, system_prompt.c_str(), user_prompt.c_str());
+            if (pos == 0 && !system_prompt.empty()) {
+                rendered_prompt = "[INST] <<SYS>>\n" + system_prompt
+                    + "\n<</SYS>>\n\n" + user_prompt + " [/INST]";
             } else {
-                char user_template[] = "[INST] %s [/INST]";
-                sprintf(rendered_prompt, user_template, user_prompt.c_str());
+                rendered_prompt = "[INST] " + user_prompt + " [/INST]";
             }
             tokenizer.encode(rendered_prompt, 1, 0, prompt_tokens);
             num_prompt_tokens = prompt_tokens.size();
