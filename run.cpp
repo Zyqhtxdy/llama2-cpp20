@@ -94,8 +94,6 @@ struct RunState {
         key_cache(config.n_layers * config.seq_max * config.kv_dim()),
         value_cache(config.n_layers * config.seq_max * config.kv_dim()) {}
 
-
-    ~RunState() = default;
 };
 
 class MappedFile {
@@ -222,7 +220,6 @@ public:
             state_ = RunState(config_);
         }
 
-    ~Transformer() = default;
 
     GPTconfig get_config() const { return config_; }
     TransformerWeights get_weights() const { return weights_; }
@@ -281,6 +278,7 @@ void matmul(std::span<float> out, std::span<const float> x, std::span<const floa
     #pragma omp parallel for private(i)
     for (i = 0; i < d; i++){
         float val = 0.0f;
+        #pragma omp simd reduction(+:val)
         for (int j = 0; j < n; j++){
             val += weight[i * n + j] * x[j];
         }
